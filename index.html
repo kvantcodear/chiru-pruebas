@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>La Chiru Jeans · Prueba de acceso (Etapa 1)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; }
+  button { font-size: 1rem; padding: .6rem 1rem; margin: .25rem .25rem .25rem 0; cursor: pointer; }
+  .ok { color: #0a7a2f; font-weight: 600; } .mal { color: #b00020; font-weight: 600; } .aviso { color: #8a5a00; font-weight: 600; }
+  pre { background: #f4f4f4; padding: .75rem; overflow-x: auto; white-space: pre-wrap; }
+  li { margin: .35rem 0; }
+  @media (prefers-color-scheme: dark) { body { background: #151515; color: #eee; } pre { background: #242424; } }
+</style>
+</head>
+<body>
+<h1>Prueba de acceso · Etapa 1</h1>
+<p>Esta página <strong>no es la aplicación</strong>: solo comprueba, con una sesión real de Google, que la base de datos deja pasar a quien corresponde y bloquea al resto.</p>
+
+<p id="config-falta" class="mal" hidden>Falta completar SUPABASE_URL y SUPABASE_CLAVE_PUBLICA dentro de este archivo (ver README, paso 5).</p>
+<div>
+  <button id="entrar">Entrar con Google</button>
+  <button id="salir" hidden>Salir</button>
+</div>
+<p id="quien"></p>
+<ol id="resultados"></ol>
+<h2>Detalle técnico</h2>
+<pre id="detalle">(todavía sin datos)</pre>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script>
+  // Completar con los datos de TU proyecto (Supabase > Project Settings > API). Es la clave PÚBLICA, no la secreta.
+  const SUPABASE_URL = 'PEGAR_URL_DEL_PROYECTO';
+  const SUPABASE_CLAVE_PUBLICA = 'PEGAR_CLAVE_PUBLICA';
+
+  const $ = (id) => document.getElementById(id);
+  const configurado = !SUPABASE_URL.startsWith('PEGAR') && !SUPABASE_CLAVE_PUBLICA.startsWith('PEGAR');
+  if (!configurado) { $('config-falta').hidden = false; $('entrar').disabled = true; }
+  const cliente = configurado ? supabase.createClient(SUPABASE_URL, SUPABASE_CLAVE_PUBLICA) : null;
+
+  function linea(clase, texto) {
+    const li = document.createElement('li');
+    const b = document.createElement('span');
+    b.className = clase; b.textContent = clase === 'ok' ? 'PASÓ: ' : (clase === 'mal' ? 'FALLÓ: ' : 'AVISO: ');
+    li.appendChild(b); li.appendChild(document.createTextNode(texto));
+    $('resultados').appendChild(li);
+  }
+
+  async function probar() {
+    $('resultados').textContent = '';
+    const detalle = {};
+    const { data: ses } = await cliente.auth.getSession();
+    if (!ses.session) { $('quien').textContent = 'No hay sesión iniciada.'; $('salir').hidden = true; $('entrar').hidden = false; return; }
+    $('entrar').hidden = true; $('salir').hidden = false;
+
+    // 1) ¿Quién soy para la base?
+    const m = await cliente.rpc('mi_sesion');
+    detalle.mi_sesion = m.error ? { error: m.error.message } : m.data;
+    if (m.error) { linea('mal', 'No se pudo consultar mi_sesion: ' + m.error.message); $('detalle').textContent = JSON.stringify(detalle, null, 2); return; }
+    const yo = m.data;
+    $('quien').textContent = 'Sesión: ' + (yo.email || '(sin email)') + ' · método: ' + (yo.proveedor || '?');
+    linea(yo.proveedor === 'google' ? 'ok' : 'mal', 'El ingreso fue con Google (método informado: ' + yo.proveedor + ').');
+    linea('aviso', 'La base te considera ' + (yo.autorizado ? 'AUTORIZADA/O' : 'NO autorizada/o') + '. Debe coincidir con lo que esperabas para esta cuenta.');
+
+    // 2) Lectura de una tabla de negocio
+    const lectura = await cliente.from('ventas').select('id', { count: 'exact', head: true });
+    detalle.leer_ventas = lectura.error ? { error: lectura.error.message } : { filas_visibles: lectura.count };
+    if (lectura.error) linea('mal', 'Leer ventas dio error: ' + lectura.error.message);
+    else if (yo.autorizado) linea('ok', 'Persona autorizada: puede leer ventas (' + lectura.count + ' filas, 0 es normal si la base está vacía).');
+    else linea(lectura.count === 0 ? 'ok' : 'mal', 'Persona NO autorizada: ve ' + lectura.count + ' filas de ventas (debe ser 0).');
+
+    // 3) Escritura directa: debe estar prohibida para todos
+    const alta = await cliente.from('categorias').insert({ nombre: 'PRUEBA-NO-DEBE-CREARSE' });
+    detalle.escribir_categorias = alta.error ? { bloqueado: alta.error.message } : { creada: true };
+    linea(alta.error ? 'ok' : 'mal', alta.error ? 'La escritura directa en categorias fue bloqueada (correcto).' : 'La escritura directa en categorias FUNCIONÓ (incorrecto: avisar).');
+
+    // 4) La lista de usuarios autorizados no debe poder leerse
+    const lista = await cliente.from('usuarios_autorizados').select('email');
+    detalle.leer_usuarios_autorizados = lista.error ? { bloqueado: lista.error.message } : { filas: (lista.data || []).length };
+    linea(lista.error ? 'ok' : 'mal', lista.error ? 'La lista de usuarios autorizados no se puede leer desde el navegador (correcto).' : 'La lista de usuarios se pudo leer (incorrecto: avisar).');
+
+    $('detalle').textContent = JSON.stringify(detalle, null, 2);
+  }
+
+  if (cliente) {
+    $('entrar').addEventListener('click', () =>
+      cliente.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href.split('#')[0] } }));
+    $('salir').addEventListener('click', async () => { await cliente.auth.signOut(); probar(); });
+    cliente.auth.onAuthStateChange(() => { setTimeout(probar, 0); });
+    probar();
+  }
+</script>
+</body>
+</html>
